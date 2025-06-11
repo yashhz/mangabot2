@@ -1,73 +1,52 @@
-# Welcome to your Lovable project
 
-## Project info
+# Manhwa Telegram Bot
 
-**URL**: https://lovable.dev/projects/f1ad9e28-85c0-42e5-b833-a6e39865f621
+A Python-based Telegram bot that automatically tracks manhwa series, downloads new chapters, adds watermarks, converts to PDF, and delivers them to your Telegram channel.
 
-## How can I edit this code?
+## Quick Setup
 
-There are several ways of editing your application.
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-**Use Lovable**
+2. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your values
+   ```
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/f1ad9e28-85c0-42e5-b833-a6e39865f621) and start prompting.
+3. **Required environment variables:**
+   - `BOT_TOKEN`: Your Telegram bot token from @BotFather
+   - `CHANNEL_ID`: Your Telegram channel ID (numeric)
 
-Changes made via Lovable will be committed automatically to this repo.
+4. **Run the bot:**
+   ```bash
+   python main.py
+   ```
 
-**Use your preferred IDE**
+## Bot Commands
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+- `/start` - Welcome message and help
+- `/add <url>` - Add manhwa to tracking
+- `/list` - Show tracked manhwa
+- `/remove <name>` - Remove manhwa from tracking
+- `/check` - Manual update check
+- `/status` - Bot status
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+## Features
 
-Follow these steps:
+- ✅ Automatic chapter detection
+- ✅ Custom watermarking 
+- ✅ PDF generation with proper naming
+- ✅ SQLite database for tracking
+- ✅ Scheduled updates every 6 hours
+- ✅ Support for multiple manhwa sites
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+## Supported Sites
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+- ManhwaClan
+- AsuraScans  
+- FlameScans
 
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
-```
-
-**Edit a file directly in GitHub**
-
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
-
-**Use GitHub Codespaces**
-
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
-
-## What technologies are used for this project?
-
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/f1ad9e28-85c0-42e5-b833-a6e39865f621) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-tricks/custom-domain#step-by-step-guide)
+Bot will automatically check for updates and deliver new chapters to your configured Telegram channel.
