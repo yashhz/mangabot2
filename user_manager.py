@@ -17,9 +17,16 @@ class UserManager:
         if os.path.exists(self.storage_file):
             try:
                 with open(self.storage_file, 'r') as f:
-                    users = set(json.load(f))
-                logger.info(f"Loaded users from {self.storage_file}: {users}")
-                return users
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        # New format with admins and users
+                        self.admin_ids.update(data.get('admins', []))
+                        return set(data.get('users', []))
+                    else:
+                        # Old format, just users
+                        return set(data)
+                logger.info(f"Loaded users from {self.storage_file}: {self.authorized_users}")
+                return self.authorized_users
             except Exception as e:
                 logger.error(f"Error loading users from {self.storage_file}: {e}")
                 return set()
@@ -28,13 +35,25 @@ class UserManager:
 
     def _save_users(self):
         try:
+            data = {
+                'admins': list(self.admin_ids),
+                'users': list(self.authorized_users)
+            }
             with open(self.storage_file, 'w') as f:
-                json.dump(list(self.authorized_users), f)
-            logger.info(f"Saved users to {self.storage_file}: {self.authorized_users}")
+                json.dump(data, f)
+            logger.info(f"Saved users to {self.storage_file}: {data}")
         except Exception as e:
             logger.error(f"Error saving users to {self.storage_file}: {e}")
 
     def is_authorized(self, user_id: int) -> bool:
+        # If no users are authorized yet, authorize the first user
+        if not self.authorized_users and not self.admin_ids:
+            logger.info(f"No authorized users found, authorizing first user {user_id}")
+            self.admin_ids.add(user_id)
+            self.authorized_users.add(user_id)
+            self._save_users()
+            return True
+
         is_auth = user_id in self.authorized_users or user_id in self.admin_ids
         logger.info(f"Authorization check for user {user_id}: {is_auth}")
         return is_auth

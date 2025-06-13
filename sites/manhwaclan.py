@@ -1,11 +1,10 @@
-
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from typing import List, Dict, Optional
 import aiohttp
 import logging
-from scraper import BaseScraper
+from base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +55,28 @@ class ManhwaClanScraper(BaseScraper):
         chapters = []
         
         try:
-            # Find chapter links
-            chapter_links = soup.find_all('a', href=re.compile(r'/chapter-\d+'))
+            # Find the chapter list container
+            chapter_list = soup.find('div', class_='listing-chapters_wrap')
+            if not chapter_list:
+                logger.error("Could not find chapter list container")
+                return []
+
+            # Find the unordered list containing chapters
+            chapter_ul = chapter_list.find('ul', class_='main')
+            if not chapter_ul:
+                logger.error("Could not find chapter list")
+                return []
+
+            # Find all chapter list items
+            chapter_items = chapter_ul.find_all('li', class_='wp-manga-chapter')
+            logger.info(f"Found {len(chapter_items)} chapter items")
             
-            for link in chapter_links[:10]:  # Get last 10 chapters
+            for item in chapter_items:
+                # Get the chapter link
+                link = item.find('a')
+                if not link:
+                    continue
+                    
                 chapter_name = link.get_text(strip=True)
                 chapter_url = urljoin(self.base_url, link['href'])
                 
@@ -68,6 +85,16 @@ class ManhwaClanScraper(BaseScraper):
                     'url': chapter_url
                 })
             
+            # Sort chapters by number
+            def get_chapter_num(chapter):
+                try:
+                    # Extract number from chapter name (e.g., "Chapter 1" -> 1)
+                    return int(re.search(r'\d+', chapter['name']).group())
+                except:
+                    return 0
+            
+            chapters.sort(key=get_chapter_num)
+            logger.info(f"Found {len(chapters)} chapters")
             return chapters
         
         except Exception as e:
@@ -84,16 +111,29 @@ class ManhwaClanScraper(BaseScraper):
         images = []
         
         try:
-            # Find images in reading area
-            img_tags = soup.find_all('img', src=re.compile(r'\.(jpg|jpeg|png|webp)'))
+            # Find the reading content container
+            reading_content = soup.find('div', class_='reading-content')
+            if not reading_content:
+                logger.error("Could not find reading content")
+                return []
+
+            # Find all image containers
+            image_containers = reading_content.find_all('div', class_='page-break')
+            logger.info(f"Found {len(image_containers)} image containers")
             
-            for img in img_tags:
+            for container in image_containers:
+                # Find the image
+                img = container.find('img', class_='wp-manga-chapter-img')
+                if not img:
+                    continue
+                    
                 src = img.get('src') or img.get('data-src')
-                if src and any(x in src for x in ['chapter', 'page', 'scan']):
+                if src:
                     if not src.startswith('http'):
                         src = urljoin(self.base_url, src)
                     images.append(src)
             
+            logger.info(f"Found {len(images)} images in chapter")
             return images
         
         except Exception as e:

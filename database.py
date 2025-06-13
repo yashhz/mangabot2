@@ -33,12 +33,6 @@ class ManhwaDB:
                     last_chapter_name TEXT
                 )
             """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    telegram_user_id INTEGER PRIMARY KEY,
-                    output_channel_id TEXT NOT NULL
-                )
-            """)
             logger.info("Database tables initialized.")
 
     def add_manhwa(self, name: str, url: str, site_name: str, telegram_user_id: int, last_chapter_url: str = "", last_chapter_name: str = ""):
