@@ -5,12 +5,11 @@ import sys
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import UpdateType
 from typing import Optional, Set, List
 from config import Config
 from database import ManhwaDB
-from scraper import ManhwaScraperManager
 from pdf_processor import PDFProcessor
 from user_manager import UserManager
 from sites.manhwaclan import ManhwaClanScraper
@@ -19,6 +18,8 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import img2pdf
 from PyPDF2 import PdfReader, PdfWriter
+import atexit
+import signal
 
 # Set environment variables
 os.environ["BOT_TOKEN"] = "7584435128:AAGHy_LQ_nmAXm7lDRoBDUbQzDWWZ3j5IQE"
@@ -37,34 +38,58 @@ logger = logging.getLogger(__name__)
 ADMIN_IDS = [7961509388, 5042428876]
 user_manager = UserManager(ADMIN_IDS)
 
+# Process lock mechanism
+def create_lock():
+    """Create a lock file to prevent multiple instances"""
+    lock_file = "bot.lock"
+    if os.path.exists(lock_file):
+        with open(lock_file, 'r') as f:
+            pid = f.read().strip()
+            try:
+                # Check if process is still running
+                os.kill(int(pid), 0)
+                print(f"Bot is already running with PID {pid}")
+                sys.exit(1)
+            except (OSError, ProcessLookupError):
+                # Process not running, remove stale lock
+                os.remove(lock_file)
+    
+    # Create lock file
+    with open(lock_file, 'w') as f:
+        f.write(str(os.getpid()))
+
+def remove_lock():
+    """Remove the lock file"""
+    try:
+        os.remove("bot.lock")
+    except:
+        pass
+
+# Register cleanup handlers
+atexit.register(remove_lock)
+signal.signal(signal.SIGINT, lambda s, f: (remove_lock(), sys.exit(0)))
+signal.signal(signal.SIGTERM, lambda s, f: (remove_lock(), sys.exit(0)))
+
 class ManhwaBot:
-    def __init__(self):
+    def __init__(self, config):
         """Initialize the bot"""
-        self.config = Config()
+        self.config = config
         self.config.validate()
         self.bot = Bot(token=self.config.BOT_TOKEN)
         self.dp = Dispatcher()
         self.db = ManhwaDB(self.config.DATABASE_PATH)
-        self.scraper = ManhwaClanScraper()
+        self.scraper = ManhwaClanScraper()  # Use ManhwaClanScraper directly
         self.user_manager = UserManager({5042428876, 7961509388})
         self.user_states = {}  # Initialize user states dictionary
+        self.pdf_processor = PDFProcessor()
         
         # Register command handlers
-        print("Registering command handlers...")
-        self.dp.message.register(self.cmd_start, Command("start"))
-        self.dp.message.register(self.cmd_fetch, Command("fetch"))
-        self.dp.message.register(self.cmd_add_user, Command("adduser"))
-        self.dp.message.register(self.cmd_remove_user, Command("removeuser"))
-        self.dp.message.register(self.cmd_list_users, Command("listusers"))
-        
-        # Register message handler for chapter ranges
-        self.dp.message.register(self.handle_chapter_range)
-        print("Command handlers registered.")
+        self.register_handlers()
 
     def register_handlers(self):
-        """Register bot command handlers"""
-        print("Registering command handlers...")
+        """Register command handlers"""
         self.dp.message.register(self.cmd_start, Command("start"))
+        self.dp.message.register(self.cmd_fetch, Command("fetch"))
         self.dp.message.register(self.cmd_add_manhwa, Command("add"))
         self.dp.message.register(self.cmd_list_manhwa, Command("list"))
         self.dp.message.register(self.cmd_remove_manhwa, Command("remove"))
@@ -74,8 +99,13 @@ class ManhwaBot:
         self.dp.message.register(self.cmd_add_user, Command("adduser"))
         self.dp.message.register(self.cmd_remove_user, Command("removeuser"))
         self.dp.message.register(self.cmd_list_users, Command("listusers"))
-        self.dp.message.register(self.cmd_fetch, Command("fetch"))
-        print("Command handlers registered.")
+        self.dp.message.register(self.cmd_search, Command("search"))
+        
+        # Register callback query handler
+        self.dp.callback_query.register(self.handle_callback_query)
+        
+        # Register message handler for chapter ranges only when user is in fetch state
+        self.dp.message.register(self.handle_chapter_range, lambda message: message.from_user.id in self.user_states)
 
     async def check_authorization(self, message: Message) -> bool:
         """Check if user is authorized to use the bot"""
@@ -109,11 +139,13 @@ class ManhwaBot:
                 welcome_text = (
                     "🤖 Manhwa Chapter Downloader Bot\n\n"
                     "How to use:\n"
-                    "1. Use /fetch <manhwa_url> to start\n"
-                    "2. I'll fetch the available chapters\n"
-                    "3. Tell me which chapters you want (e.g., '1-5' or 'latest')\n"
+                    "1. Use /search <manhwa_name> to search for manhwa\n"
+                    "2. Or use /fetch <manhwa_url> to start with a URL\n"
+                    "3. Select the chapters you want\n"
                     "4. I'll send you the chapters as PDFs\n\n"
                     "Example:\n"
+                    "/search solo leveling\n"
+                    "or\n"
                     "/fetch https://manhwaclan.com/manga/example"
                 )
                 logger.info(f"Sending welcome message to user {user_id}")
@@ -130,182 +162,135 @@ class ManhwaBot:
 
     async def cmd_fetch(self, message: Message):
         """Handle /fetch command"""
+        if not await self.check_authorization(message):
+            return
+
+        # Get URL from message
+        url = message.text.split(' ', 1)[1].strip()
+        if not url:
+            await message.reply("Please provide a URL. Usage: /fetch <url>")
+            return
+
+        # Send initial message
+        status_msg = await message.reply("Fetching chapters...")
+
         try:
-            if not await self.check_authorization(message):
-                return
-
-            # Extract URL from command
-            parts = message.text.split()
-            if len(parts) != 2:
-                await message.answer("Please use the command like this: /fetch <manhwa_url>")
-                return
-
-            # Clean up URL
-            url = parts[1].strip()
-            url = url.strip('@')  # Remove @ if present
-            url = url.strip()     # Remove any extra spaces
-            
-            logger.info(f"Processing URL: {url}")
-            
-            if not url.startswith('https://manhwaclan.com/manga/'):
-                await message.answer("Please send a valid manhwa URL from manhwaclan.com")
-                return
-
-            # Store the URL in user state
-            self.user_states[message.from_user.id] = {'url': url}
-            
-            # Fetch available chapters
-            await message.answer("Fetching available chapters...")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    logger.info("Created aiohttp session")
-                    chapters = await self.scraper.get_latest_chapters(session, url)
-                    logger.info(f"Found {len(chapters)} chapters")
-                    
-                    if not chapters:
-                        logger.error("No chapters found in the response")
-                        await message.answer("No chapters found for this manhwa.")
-                        return
-
-                    # Format chapter list
-                    chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
-                    response = (
-                        "Available chapters:\n\n"
-                        f"{chapter_list}\n\n"
-                        "Please specify which chapters you want:\n"
-                        "- Send a range (e.g., '1-5')\n"
-                        "- Send 'latest' for the most recent chapter\n"
-                        "- Send a single number (e.g., '3')"
-                    )
-                    await message.answer(response)
-            except Exception as e:
-                logger.error(f"Error fetching chapters: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                await message.answer(f"Error fetching chapters: {str(e)}")
-                return
-                
-        except Exception as e:
-            logger.error(f"Error in cmd_fetch: {str(e)}")
-            logger.error(f"Error type: {type(e)}")
-            await message.answer("Sorry, there was an error processing the URL. Please try again.")
-
-    async def handle_chapter_range(self, message: Message) -> None:
-        """Handle chapter range input from user"""
-        try:
-            user_id = message.from_user.id
-            if not self.user_manager.is_authorized(user_id):
-                logger.info(f"Unauthorized access attempt from user {user_id}")
-                await message.reply("You are not authorized to use this bot.")
-                return
-
-            # Check if user has a pending URL
-            if user_id not in self.user_states or 'url' not in self.user_states[user_id]:
-                await message.reply("Please use /fetch command first with a manhwa URL.")
-                return
-
-            url = self.user_states[user_id]['url']
-            input_text = message.text.strip().lower()
-            
-            # Extract manhwa name from URL
-            manhwa_name = url.split('/')[-1].replace('-', ' ').title()
-            
-            # Parse chapter range
-            if input_text == "latest":
-                start_chapter = 1
-                end_chapter = 1
-            else:
-                try:
-                    if "-" in input_text:
-                        start, end = map(int, input_text.split("-"))
-                        start_chapter = min(start, end)
-                        end_chapter = max(start, end)
-                    else:
-                        start_chapter = end_chapter = int(input_text)
-                except ValueError:
-                    await message.reply("Invalid input. Please send a number (e.g., '1'), a range (e.g., '1-5'), or 'latest'.")
-                    return
-
-            # Get chapters
+            # Create session and get chapters
             async with aiohttp.ClientSession() as session:
                 chapters = await self.scraper.get_latest_chapters(session, url)
-                if not chapters:
-                    await message.reply("No chapters found for this manhwa.")
-                    return
-
-                logger.info(f"Processing {len(chapters)} chapters")
-                # Sort chapters by chapter number
-                chapters.sort(key=lambda x: float(x['name'].split()[-1].replace('-', '.')))
                 
-                # Get requested chapters
-                requested_chapters = []
-                for chapter in chapters:
-                    try:
-                        chapter_num = float(chapter['name'].split()[-1].replace('-', '.'))
-                        if start_chapter <= chapter_num <= end_chapter:
-                            requested_chapters.append(chapter)
-                    except (ValueError, IndexError):
-                        continue
-
-                if not requested_chapters:
-                    await message.reply(f"No chapters found in range {start_chapter}-{end_chapter}")
+                if not chapters:
+                    await status_msg.edit_text("No chapters found or error occurred.")
                     return
 
-                logger.info(f"Processing chapters {start_chapter} to {end_chapter}")
-                for chapter in requested_chapters:
+                # Store chapters and URL in user state
+                self.user_states[message.from_user.id] = {
+                    'state': 'fetching',
+                    'chapters': chapters,
+                    'url': url
+                }
+
+                # Format chapter list
+                chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
+                await status_msg.edit_text(
+                    f"Found {len(chapters)} chapters.\n\n"
+                    f"Available chapters:\n{chapter_list}\n\n"
+                    "Please select chapters using one of these formats:\n"
+                    "- Single chapter: 1\n"
+                    "- Range: 1-5\n"
+                    "- Multiple chapters: 1,3,5"
+                )
+
+        except Exception as e:
+            logger.error(f"Error in fetch command: {e}")
+            await status_msg.edit_text(f"Error occurred: {str(e)}")
+            # Clean up user state
+            self.user_states.pop(message.from_user.id, None)
+
+    async def handle_chapter_range(self, message: Message) -> None:
+        """Handle chapter range selection"""
+        if not await self.check_authorization(message):
+            return
+
+        user_id = message.from_user.id
+        user_state = self.user_states.get(user_id)
+        if not user_state or user_state.get('state') != 'fetching':
+            await message.reply("Please use /fetch command first.")
+            return
+
+        chapters = user_state['chapters']
+        url = user_state['url']
+        selected_chapters = []
+
+        try:
+            # Parse user input
+            text = message.text.strip()
+            
+            # Handle range format (e.g., "1-5")
+            if '-' in text:
+                start, end = map(int, text.split('-'))
+                selected_chapters = chapters[start-1:end]
+            
+            # Handle comma-separated format (e.g., "1,3,5")
+            elif ',' in text:
+                indices = [int(x.strip()) - 1 for x in text.split(',')]
+                selected_chapters = [chapters[i] for i in indices if 0 <= i < len(chapters)]
+            
+            # Handle single chapter (e.g., "1")
+            else:
+                try:
+                    index = int(text) - 1
+                    if 0 <= index < len(chapters):
+                        selected_chapters = [chapters[index]]
+                except ValueError:
+                    await message.reply("Invalid input. Please use format: 1, 1-5, or 1,3,5")
+                    return
+
+            if not selected_chapters:
+                await message.reply("No valid chapters selected.")
+                return
+
+            # Process selected chapters
+            status_msg = await message.reply(f"Processing {len(selected_chapters)} chapters...")
+            
+            async with aiohttp.ClientSession() as session:
+                for chapter in selected_chapters:
                     try:
-                        # Send progress message
-                        progress_msg = await message.reply(f"🔄 Processing chapter {chapter['name']}...")
-                        
                         # Get chapter images
                         images = await self.scraper.get_chapter_images(session, chapter['url'])
                         if not images:
-                            await progress_msg.edit_text(f"❌ No images found in chapter {chapter['name']}")
                             continue
 
-                        logger.info(f"Found {len(images)} images for chapter {chapter['name']}")
-                        await progress_msg.edit_text(f"📥 Downloading {len(images)} images for chapter {chapter['name']}...")
-                        
-                        # Format chapter number with leading zeros
-                        chapter_num = chapter['name'].split()[-1]
-                        if '.' in chapter_num:
-                            num, dec = chapter_num.split('.')
-                            formatted_num = f"{int(num):03d}.{dec}"
-                        else:
-                            formatted_num = f"{int(chapter_num):03d}"
-                        
-                        # Create PDF with formatted name
-                        pdf_name = f"{formatted_num} - {manhwa_name}.pdf"
-                        pdf_path = f"temp_{pdf_name}"
-                        
-                        await progress_msg.edit_text(f"📝 Creating PDF for chapter {chapter['name']}...")
-                        await self.create_pdf(images, pdf_path, manhwa_name, chapter_num)
-                        
-                        # Send PDF
-                        await progress_msg.edit_text(f"📤 Sending chapter {chapter['name']}...")
-                        with open(pdf_path, 'rb') as pdf_file:
-                            await message.reply_document(
-                                document=types.FSInputFile(pdf_path, filename=pdf_name),
-                                caption=f"✅ Chapter {chapter['name']}"
-                            )
-                        
-                        # Clean up
-                        os.remove(pdf_path)
-                        await progress_msg.delete()
-                        
+                        # Create PDF
+                        pdf_path = await self.pdf_processor.create_chapter_pdf(
+                            images,
+                            chapter['name'],
+                            url
+                        )
+
+                        if pdf_path:
+                            # Send PDF
+                            with open(pdf_path, 'rb') as pdf_file:
+                                await message.answer_document(
+                                    document=types.FSInputFile(pdf_path),
+                                    caption=f"Chapter: {chapter['name']}"
+                                )
+                            # Clean up PDF file
+                            os.remove(pdf_path)
+
                     except Exception as e:
                         logger.error(f"Error processing chapter {chapter['name']}: {e}")
-                        await message.reply(f"❌ Error processing chapter {chapter['name']}: {str(e)}")
-                        continue
+                        await message.reply(f"Error processing chapter {chapter['name']}: {str(e)}")
 
-                await message.reply("✅ All requested chapters have been sent!")
-                
+            await status_msg.edit_text("All chapters processed!")
+
         except Exception as e:
-            logger.error(f"Error in handle_chapter_range: {e}")
-            await message.reply(f"❌ An error occurred: {str(e)}")
+            logger.error(f"Error in chapter range handler: {e}")
+            await message.reply(f"Error occurred: {str(e)}")
+        
         finally:
-            # Clear user state after processing
-            if user_id in self.user_states:
-                del self.user_states[user_id]
+            # Clean up user state
+            self.user_states.pop(user_id, None)
 
     async def handle_message(self, message: Message):
         """Handle all messages"""
@@ -325,7 +310,7 @@ class ManhwaBot:
             url = args[1]
             user_id = message.from_user.id
 
-            result = await self.scraper_manager.add_manhwa(url)
+            result = await self.scraper.add_manhwa(url)
             if result["success"]:
                 self.db.add_manhwa(
                     name=result["name"],
@@ -427,8 +412,8 @@ class ManhwaBot:
             processing_msg = await message.answer(f"🔄 Getting chapters for {manhwa_name}...")
 
             # Get chapter info
-            session = await self.scraper_manager.get_session()
-            scraper = self.scraper_manager.get_scraper(manhwa.url)
+            session = await self.scraper.get_session()
+            scraper = self.scraper
             if not scraper:
                 await processing_msg.edit_text(f"❌ Unsupported site for {manhwa_name}")
                 return
@@ -512,7 +497,7 @@ class ManhwaBot:
         for manhwa in manhwa_list:
             try:
                 logger.info(f"Checking {manhwa.name}")
-                new_chapters = await self.scraper_manager.check_new_chapters(manhwa)
+                new_chapters = await self.scraper.check_new_chapters(manhwa)
                 for chapter in new_chapters:
                     # Get the user\'s specific output channel for this manhwa
                     user_output_channel = self.db.get_user_output_channel(manhwa.telegram_user_id)
@@ -534,49 +519,29 @@ class ManhwaBot:
         return updates
 
     async def process_and_deliver_chapter(self, manhwa, chapter, user_id: int) -> bool:
-        """Download, process and deliver a chapter to user's DM"""
+        """Process and deliver a chapter to a user"""
         try:
-            logger.info(f"Starting to process chapter {chapter['name']} for {manhwa.name}")
-            
-            # Download chapter images
-            logger.info(f"Downloading images from {chapter['url']}")
-            images = await self.scraper_manager.download_chapter_images(
-                chapter['url'],
-                manhwa.site_name
-            )
-            if not images:
-                logger.error(f"No images found for {chapter['name']}")
-                return False
-            logger.info(f"Successfully downloaded {len(images)} images")
-
-            # Process images and create PDF
-            logger.info("Creating PDF from images")
+            # Create PDF
             pdf_path = await self.pdf_processor.create_chapter_pdf(
-                images,
+                chapter['images'],
                 manhwa.name,
                 chapter['name']
             )
+            
             if not pdf_path:
-                logger.error(f"Failed to create PDF for {chapter['name']}")
+                logger.error("Failed to create PDF")
                 return False
+            
             logger.info(f"PDF created successfully at {pdf_path}")
-
-            # Send to user's DM
-            logger.info(f"Sending to user {user_id}")
-            try:
-                await self.send_chapter_to_user(pdf_path, manhwa.name, chapter['name'], user_id)
-                logger.info("Successfully sent to user")
-            except Exception as e:
-                logger.error(f"Error sending to user: {e}")
-                return False
-
+            
+            # Send to user
+            success = await self.send_chapter_to_user(pdf_path, manhwa.name, chapter['name'], user_id)
+            
             # Cleanup
-            logger.info("Cleaning up temporary files")
             if os.path.exists(pdf_path):
                 os.remove(pdf_path)
             
-            logger.info("Chapter processing completed successfully")
-            return True
+            return success
             
         except Exception as e:
             logger.error(f"Error in process_and_deliver_chapter: {e}")
@@ -595,9 +560,11 @@ class ManhwaBot:
             
             # Send PDF using FSInputFile
             try:
+                # Use the same filename that was created in pdf_processor
+                pdf_filename = os.path.basename(pdf_path)
                 message = await self.bot.send_document(
                     chat_id=user_id,
-                    document=types.FSInputFile(pdf_path, filename=f"{manhwa_name} - {chapter_name}.pdf"),
+                    document=types.FSInputFile(pdf_path, filename=pdf_filename),
                     caption=caption
                 )
                 logger.info(f"Successfully sent message to user. Message ID: {message.message_id}")
@@ -677,15 +644,113 @@ class ManhwaBot:
             logger.error(f"Error listing users: {e}")
             await message.answer("❌ Error listing users")
 
+    async def cmd_search(self, message: Message):
+        """Handle /search command"""
+        if not await self.check_authorization(message):
+            return
+
+        # Get search query
+        query = message.text.split(' ', 1)[1].strip()
+        if not query:
+            await message.reply("Please provide a search query. Usage: /search <manhwa_name>")
+            return
+
+        # Send initial message
+        status_msg = await message.reply("Searching...")
+
+        try:
+            # Search for manhwa
+            results = await self.scraper.search_manhwa(query)
+            
+            if not results:
+                await status_msg.edit_text("No results found.")
+                return
+
+            # Create inline keyboard with results
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=result['title'], callback_data=f"select_{result['url']}")]
+                for result in results[:5]  # Show top 5 results
+            ])
+
+            await status_msg.edit_text(
+                "Found these manhwa. Click on one to view chapters:",
+                reply_markup=keyboard
+            )
+
+        except Exception as e:
+            logger.error(f"Error in search command: {e}")
+            await status_msg.edit_text(f"Error occurred: {str(e)}")
+
+    async def handle_callback_query(self, callback_query: types.CallbackQuery):
+        """Handle callback queries from inline keyboards"""
+        if not await self.check_authorization(callback_query.message):
+            return
+
+        try:
+            data = callback_query.data
+            if data.startswith("select_"):
+                # Get manhwa URL from callback data
+                url = data[7:]  # Remove "select_" prefix
+                
+                # Send status message
+                status_msg = await callback_query.message.answer("Fetching chapters...")
+                
+                # Get chapters
+                async with aiohttp.ClientSession() as session:
+                    chapters = await self.scraper.get_latest_chapters(session, url)
+                    
+                    if not chapters:
+                        await status_msg.edit_text("No chapters found.")
+                        return
+
+                    # Store chapters and URL in user state
+                    self.user_states[callback_query.from_user.id] = {
+                        'state': 'fetching',
+                        'chapters': chapters,
+                        'url': url
+                    }
+
+                    # Format chapter list
+                    chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
+                    await status_msg.edit_text(
+                        f"Found {len(chapters)} chapters.\n\n"
+                        f"Available chapters:\n{chapter_list}\n\n"
+                        "Please select chapters using one of these formats:\n"
+                        "- Single chapter: 1\n"
+                        "- Range: 1-5\n"
+                        "- Multiple chapters: 1,3,5"
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in callback query handler: {e}")
+            await callback_query.message.answer(f"Error occurred: {str(e)}")
+
     async def start_bot(self):
         """Start the bot"""
         try:
             # Initialize database
             self.db.init_tables()
 
-            # Start polling
+            # Start polling with retry mechanism
             logger.info("Starting Manhwa Bot...")
-            await self.dp.start_polling(self.bot, allowed_updates=[UpdateType.MESSAGE])
+            retry_count = 0
+            max_retries = 3
+            
+            while retry_count < max_retries:
+                try:
+                    await self.dp.start_polling(self.bot, allowed_updates=[UpdateType.MESSAGE])
+                    break
+                except Exception as e:
+                    if "Conflict" in str(e):
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            logger.warning(f"Bot conflict detected. Attempt {retry_count} of {max_retries}. Waiting 5 seconds...")
+                            await asyncio.sleep(5)
+                        else:
+                            logger.error("Maximum retry attempts reached. Please ensure no other bot instances are running.")
+                            raise
+                    else:
+                        raise
         except Exception as e:
             logger.error(f"Error starting bot: {e}")
             sys.exit(1)
@@ -776,12 +841,26 @@ class ManhwaBot:
             raise e
 
 if __name__ == "__main__":
-    # Check if another instance is running
+    # Create process lock
+    create_lock()
+    
     try:
-        bot = ManhwaBot()
+        # Initialize logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        logger = logging.getLogger(__name__)
+        
+        # Create bot instance
+        config = Config()
+        config.validate()
+        
+        bot = ManhwaBot(config)
         asyncio.run(bot.start_bot())
     except KeyboardInterrupt:
         print("\nBot stopped by user")
     except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        logger.error(f"Error: {e}")
+    finally:
+        remove_lock()

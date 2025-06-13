@@ -8,6 +8,7 @@ import logging
 from sites.manhwaclan import ManhwaClanScraper
 # from sites.asurascans import AsuraScansScraper # Commented out for now
 # from sites.flamescans import FlameScansScraper # Commented out for now
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,9 @@ class ManhwaScraperManager:
             # 'flamescans.org': FlameScansScraper(), # Add back when ready
         }
         self.session = None
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
 
     async def get_session(self):
         """Get or create aiohttp session"""
@@ -107,4 +111,182 @@ class ManhwaScraperManager:
             return downloaded_images
         except Exception as e:
             logger.error(f"Error downloading chapter images: {e}")
+            return []
+
+    async def search_manhwa(self, query: str, site_name: str) -> List[Dict[str, str]]:
+        """Search for manhwa on the specified site"""
+        if site_name.lower() == "manhwaclan":
+            return await self._search_manhwaclan(query)
+        else:
+            logger.error(f"Search not implemented for site: {site_name}")
+            return []
+
+    async def _search_manhwaclan(self, query: str) -> List[Dict[str, str]]:
+        """Search for manhwa on ManhwaClan"""
+        try:
+            # Format the search URL
+            search_url = f"https://manhwaclan.com/?s={query.replace(' ', '+')}"
+            logger.info(f"Searching ManhwaClan with URL: {search_url}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url, headers=self.headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch search results: {response.status}")
+                        return []
+                    
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Find all search results
+                    results = []
+                    
+                    # Try different possible selectors for search results
+                    selectors = [
+                        ('div', 'manga-item'),  # New structure
+                        ('div', 'bs'),          # Alternative structure
+                        ('article', 'post'),    # Old structure
+                        ('div', 'item-thumb'),  # Another possible structure
+                    ]
+                    
+                    for tag, class_name in selectors:
+                        items = soup.find_all(tag, class_=class_name)
+                        if items:
+                            logger.info(f"Found results using selector: {tag}.{class_name}")
+                            for item in items:
+                                try:
+                                    # Try different possible title selectors
+                                    title_elem = (
+                                        item.find('h3', class_='manga-title') or
+                                        item.find('h4') or
+                                        item.find('h2', class_='title') or
+                                        item.find('h3') or
+                                        item.find('h2')
+                                    )
+                                    
+                                    if not title_elem:
+                                        continue
+                                        
+                                    title = title_elem.text.strip()
+                                    link = title_elem.find('a')['href']
+                                    
+                                    # Try different possible image selectors
+                                    img_elem = (
+                                        item.find('img', class_='manga-thumb') or
+                                        item.find('img', class_='wp-post-image') or
+                                        item.find('img')
+                                    )
+                                    thumbnail = img_elem['src'] if img_elem else None
+                                    
+                                    results.append({
+                                        'title': title,
+                                        'url': link,
+                                        'thumbnail': thumbnail
+                                    })
+                                except Exception as e:
+                                    logger.error(f"Error parsing search result: {e}")
+                                    continue
+                            
+                            # If we found results with this selector, break the loop
+                            if results:
+                                break
+                    
+                    logger.info(f"Found {len(results)} search results for query: {query}")
+                    return results[:5]  # Return top 5 results
+                    
+        except Exception as e:
+            logger.error(f"Error searching ManhwaClan: {e}")
+            return []
+
+    async def get_chapter_list(self, url: str, site_name: str) -> List[Dict[str, str]]:
+        """Get list of chapters for a manhwa"""
+        if site_name.lower() == "manhwaclan":
+            return await self._get_manhwaclan_chapters(url)
+        else:
+            logger.error(f"Chapter list not implemented for site: {site_name}")
+            return []
+
+    async def _get_manhwaclan_chapters(self, url: str) -> List[Dict[str, str]]:
+        """Get list of chapters from ManhwaClan"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch chapters: {response.status}")
+                        return []
+                    
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    chapters = []
+                    # Find the chapter list
+                    chapter_list = soup.find('div', class_='chapter-list')
+                    if chapter_list:
+                        for chapter in chapter_list.find_all('a'):
+                            try:
+                                chapter_url = chapter['href']
+                                chapter_name = chapter.text.strip()
+                                chapters.append({
+                                    'name': chapter_name,
+                                    'url': chapter_url
+                                })
+                            except Exception as e:
+                                logger.error(f"Error parsing chapter: {e}")
+                                continue
+                    
+                    return sorted(chapters, key=lambda x: float(re.search(r'\d+', x['name']).group()) if re.search(r'\d+', x['name']) else 0)
+                    
+        except Exception as e:
+            logger.error(f"Error getting chapters from ManhwaClan: {e}")
+            return []
+
+    async def _download_manhwaclan_images(self, url: str) -> List[str]:
+        """Download images from ManhwaClan chapter"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch chapter: {response.status}")
+                        return []
+                    
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Find all images in the chapter
+                    image_urls = []
+                    for img in soup.find_all('img', class_='wp-manga-chapter-img'):
+                        try:
+                            img_url = img['src']
+                            if img_url:
+                                image_urls.append(img_url)
+                        except Exception as e:
+                            logger.error(f"Error parsing image URL: {e}")
+                            continue
+
+                    if not image_urls:
+                        return []
+
+                    # Download images concurrently
+                    async def download_image(img_url: str, index: int) -> Optional[str]:
+                        try:
+                            async with session.get(img_url, headers=self.headers) as img_response:
+                                if img_response.status == 200:
+                                    img_data = await img_response.read()
+                                    filename = f"temp/chapter_{index+1:03d}.jpg"
+                                    with open(filename, 'wb') as f:
+                                        f.write(img_data)
+                                    return filename
+                        except Exception as e:
+                            logger.error(f"Error downloading image {img_url}: {e}")
+            return None
+
+                    # Create tasks for concurrent downloads
+                    tasks = [download_image(url, i) for i, url in enumerate(image_urls)]
+                    downloaded_files = await asyncio.gather(*tasks)
+                    
+                    # Filter out None values and sort by filename
+                    return sorted([f for f in downloaded_files if f is not None], 
+                                key=lambda x: int(x.split('_')[1].split('.')[0]))
+                    
+        except Exception as e:
+            logger.error(f"Error downloading ManhwaClan images: {e}")
             return []
