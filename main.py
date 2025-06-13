@@ -12,7 +12,7 @@ from config import Config
 from database import ManhwaDB
 from pdf_processor import PDFProcessor
 from user_manager import UserManager
-from sites.manhwaclan import ManhwaClanScraper
+from scraper import ManhwaScraperManager
 import aiofiles
 from PIL import Image, ImageDraw, ImageFont
 import io
@@ -78,7 +78,7 @@ class ManhwaBot:
         self.bot = Bot(token=self.config.BOT_TOKEN)
         self.dp = Dispatcher()
         self.db = ManhwaDB(self.config.DATABASE_PATH)
-        self.scraper = ManhwaClanScraper()  # Use ManhwaClanScraper directly
+        self.scraper = ManhwaScraperManager()  # Use ManhwaScraperManager
         self.user_manager = UserManager({5042428876, 7961509388})
         self.user_states = {}  # Initialize user states dictionary
         self.pdf_processor = PDFProcessor()
@@ -166,40 +166,48 @@ class ManhwaBot:
             return
 
         # Get URL from message
-        url = message.text.split(' ', 1)[1].strip()
-        if not url:
+        args = message.text.split(' ', 1)
+        if len(args) < 2:
             await message.reply("Please provide a URL. Usage: /fetch <url>")
             return
+            
+        url = args[1].strip()
 
         # Send initial message
         status_msg = await message.reply("Fetching chapters...")
 
         try:
+            # Get scraper for the URL
+            scraper = self.scraper.get_scraper(url)
+            if not scraper:
+                await status_msg.edit_text("Unsupported site. Currently only ManhwaClan is supported.")
+                return
+
             # Create session and get chapters
-            async with aiohttp.ClientSession() as session:
-                chapters = await self.scraper.get_latest_chapters(session, url)
-                
-                if not chapters:
-                    await status_msg.edit_text("No chapters found or error occurred.")
-                    return
+            session = await self.scraper.get_session()
+            chapters = await scraper.get_latest_chapters(session, url)
+            
+            if not chapters:
+                await status_msg.edit_text("No chapters found or error occurred.")
+                return
 
-                # Store chapters and URL in user state
-                self.user_states[message.from_user.id] = {
-                    'state': 'fetching',
-                    'chapters': chapters,
-                    'url': url
-                }
+            # Store chapters and URL in user state
+            self.user_states[message.from_user.id] = {
+                'state': 'fetching',
+                'chapters': chapters,
+                'url': url
+            }
 
-                # Format chapter list
-                chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
-                await status_msg.edit_text(
-                    f"Found {len(chapters)} chapters.\n\n"
-                    f"Available chapters:\n{chapter_list}\n\n"
-                    "Please select chapters using one of these formats:\n"
-                    "- Single chapter: 1\n"
-                    "- Range: 1-5\n"
-                    "- Multiple chapters: 1,3,5"
-                )
+            # Format chapter list
+            chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
+            await status_msg.edit_text(
+                f"Found {len(chapters)} chapters.\n\n"
+                f"Available chapters:\n{chapter_list}\n\n"
+                "Please select chapters using one of these formats:\n"
+                "- Single chapter: 1\n"
+                "- Range: 1-5\n"
+                "- Multiple chapters: 1,3,5"
+            )
 
         except Exception as e:
             logger.error(f"Error in fetch command: {e}")
@@ -253,34 +261,37 @@ class ManhwaBot:
             # Process selected chapters
             status_msg = await message.reply(f"Processing {len(selected_chapters)} chapters...")
             
-            async with aiohttp.ClientSession() as session:
-                for chapter in selected_chapters:
-                    try:
-                        # Get chapter images
-                        images = await self.scraper.get_chapter_images(session, chapter['url'])
-                        if not images:
-                            continue
+            # Get scraper for processing
+            scraper = self.scraper.get_scraper(url)
+            session = await self.scraper.get_session()
+            
+            for chapter in selected_chapters:
+                try:
+                    # Get chapter images
+                    images = await scraper.get_chapter_images(session, chapter['url'])
+                    if not images:
+                        continue
 
-                        # Create PDF
-                        pdf_path = await self.pdf_processor.create_chapter_pdf(
-                            images,
-                            chapter['name'],
-                            url
-                        )
+                    # Create PDF
+                    pdf_path = await self.pdf_processor.create_chapter_pdf(
+                        images,
+                        chapter['name'],
+                        url
+                    )
 
-                        if pdf_path:
-                            # Send PDF
-                            with open(pdf_path, 'rb') as pdf_file:
-                                await message.answer_document(
-                                    document=types.FSInputFile(pdf_path),
-                                    caption=f"Chapter: {chapter['name']}"
-                                )
-                            # Clean up PDF file
-                            os.remove(pdf_path)
+                    if pdf_path:
+                        # Send PDF
+                        with open(pdf_path, 'rb') as pdf_file:
+                            await message.answer_document(
+                                document=types.FSInputFile(pdf_path),
+                                caption=f"Chapter: {chapter['name']}"
+                            )
+                        # Clean up PDF file
+                        os.remove(pdf_path)
 
-                    except Exception as e:
-                        logger.error(f"Error processing chapter {chapter['name']}: {e}")
-                        await message.reply(f"Error processing chapter {chapter['name']}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error processing chapter {chapter['name']}: {e}")
+                    await message.reply(f"Error processing chapter {chapter['name']}: {str(e)}")
 
             await status_msg.edit_text("All chapters processed!")
 
@@ -413,7 +424,7 @@ class ManhwaBot:
 
             # Get chapter info
             session = await self.scraper.get_session()
-            scraper = self.scraper
+            scraper = self.scraper.get_scraper(manhwa.url)
             if not scraper:
                 await processing_msg.edit_text(f"❌ Unsupported site for {manhwa_name}")
                 return
@@ -645,41 +656,67 @@ class ManhwaBot:
             await message.answer("❌ Error listing users")
 
     async def cmd_search(self, message: Message):
-        """Handle /search command"""
+        """Handle /search command with improved functionality"""
         if not await self.check_authorization(message):
             return
 
         # Get search query
-        query = message.text.split(' ', 1)[1].strip()
-        if not query:
+        args = message.text.split(' ', 1)
+        if len(args) < 2:
             await message.reply("Please provide a search query. Usage: /search <manhwa_name>")
             return
+            
+        query = args[1].strip()
 
         # Send initial message
-        status_msg = await message.reply("Searching...")
+        status_msg = await message.reply(f"🔍 Searching for '{query}'...")
 
         try:
-            # Search for manhwa
+            # Search for manhwa using the improved search functionality
             results = await self.scraper.search_manhwa(query)
             
             if not results:
-                await status_msg.edit_text("No results found.")
+                await status_msg.edit_text(f"No results found for '{query}'. Try different keywords or check spelling.")
                 return
 
             # Create inline keyboard with results
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=result['title'], callback_data=f"select_{result['url']}")]
-                for result in results[:5]  # Show top 5 results
-            ])
+            keyboard_buttons = []
+            result_text = f"🔍 Found {len(results)} results for '{query}':\n\n"
+            
+            for i, result in enumerate(results[:5], 1):  # Show top 5 results
+                title = result['title']
+                # Truncate long titles for button display
+                button_title = title if len(title) <= 30 else title[:27] + "..."
+                
+                keyboard_buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{i}. {button_title}", 
+                        callback_data=f"select_{result['url']}"
+                    )
+                ])
+                
+                # Add result info to text
+                result_text += f"{i}. **{title}**\n"
+                if result.get('status'):
+                    result_text += f"   Status: {result['status']}\n"
+                if result.get('genres'):
+                    genres_str = ", ".join(result['genres'][:3])  # Show first 3 genres
+                    if len(result['genres']) > 3:
+                        genres_str += f" +{len(result['genres']) - 3} more"
+                    result_text += f"   Genres: {genres_str}\n"
+                result_text += "\n"
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
             await status_msg.edit_text(
-                "Found these manhwa. Click on one to view chapters:",
-                reply_markup=keyboard
+                result_text + "👆 Click on a title above to view its chapters:",
+                reply_markup=keyboard,
+                parse_mode="Markdown"
             )
 
         except Exception as e:
             logger.error(f"Error in search command: {e}")
-            await status_msg.edit_text(f"Error occurred: {str(e)}")
+            await status_msg.edit_text(f"❌ Error occurred while searching: {str(e)}")
 
     async def handle_callback_query(self, callback_query: types.CallbackQuery):
         """Handle callback queries from inline keyboards"""
@@ -692,38 +729,54 @@ class ManhwaBot:
                 # Get manhwa URL from callback data
                 url = data[7:]  # Remove "select_" prefix
                 
-                # Send status message
-                status_msg = await callback_query.message.answer("Fetching chapters...")
+                # Acknowledge the callback query
+                await callback_query.answer("Loading chapters...")
                 
-                # Get chapters
-                async with aiohttp.ClientSession() as session:
-                    chapters = await self.scraper.get_latest_chapters(session, url)
-                    
-                    if not chapters:
-                        await status_msg.edit_text("No chapters found.")
-                        return
+                # Send status message
+                status_msg = await callback_query.message.answer("📖 Fetching chapters...")
+                
+                # Get scraper and chapters
+                scraper = self.scraper.get_scraper(url)
+                if not scraper:
+                    await status_msg.edit_text("❌ Unsupported site.")
+                    return
+                
+                session = await self.scraper.get_session()
+                chapters = await scraper.get_latest_chapters(session, url)
+                
+                if not chapters:
+                    await status_msg.edit_text("❌ No chapters found.")
+                    return
 
-                    # Store chapters and URL in user state
-                    self.user_states[callback_query.from_user.id] = {
-                        'state': 'fetching',
-                        'chapters': chapters,
-                        'url': url
-                    }
+                # Store chapters and URL in user state
+                self.user_states[callback_query.from_user.id] = {
+                    'state': 'fetching',
+                    'chapters': chapters,
+                    'url': url
+                }
 
-                    # Format chapter list
+                # Format chapter list (show first 10 and last 5 if more than 15 chapters)
+                if len(chapters) <= 15:
                     chapter_list = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters)])
-                    await status_msg.edit_text(
-                        f"Found {len(chapters)} chapters.\n\n"
-                        f"Available chapters:\n{chapter_list}\n\n"
-                        "Please select chapters using one of these formats:\n"
-                        "- Single chapter: 1\n"
-                        "- Range: 1-5\n"
-                        "- Multiple chapters: 1,3,5"
-                    )
+                else:
+                    first_10 = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters[:10])])
+                    last_5 = "\n".join([f"{i+1}. {ch['name']}" for i, ch in enumerate(chapters[-5:], len(chapters)-4)])
+                    chapter_list = f"{first_10}\n... ({len(chapters)-15} more chapters) ...\n{last_5}"
+
+                await status_msg.edit_text(
+                    f"📚 Found {len(chapters)} chapters.\n\n"
+                    f"**Available chapters:**\n{chapter_list}\n\n"
+                    "**Select chapters using one of these formats:**\n"
+                    "• Single chapter: `1`\n"
+                    "• Range: `1-5`\n"
+                    "• Multiple chapters: `1,3,5`\n"
+                    "• Latest chapter: `latest`",
+                    parse_mode="Markdown"
+                )
 
         except Exception as e:
             logger.error(f"Error in callback query handler: {e}")
-            await callback_query.message.answer(f"Error occurred: {str(e)}")
+            await callback_query.message.answer(f"❌ Error occurred: {str(e)}")
 
     async def start_bot(self):
         """Start the bot"""
@@ -738,7 +791,7 @@ class ManhwaBot:
             
             while retry_count < max_retries:
                 try:
-                    await self.dp.start_polling(self.bot, allowed_updates=[UpdateType.MESSAGE])
+                    await self.dp.start_polling(self.bot, allowed_updates=[UpdateType.MESSAGE, UpdateType.CALLBACK_QUERY])
                     break
                 except Exception as e:
                     if "Conflict" in str(e):

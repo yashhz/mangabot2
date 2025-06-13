@@ -141,77 +141,111 @@ class ManhwaClanScraper(BaseScraper):
             return []
 
     async def search_manhwa(self, query: str) -> List[Dict[str, str]]:
-        """Search for manhwa on ManhwaClan"""
+        """Search for manhwa on ManhwaClan using the correct search format"""
         try:
-            # Format the search URL - ManhwaClan uses a different search endpoint
-            search_url = f"{self.base_url}/wp-admin/admin-ajax.php"
-            logger.info(f"Searching ManhwaClan for: {query}")
+            # Use the correct search URL format with post_type parameter
+            search_url = f"{self.base_url}/?s={query.replace(' ', '+')}&post_type=wp-manga"
+            logger.info(f"Searching ManhwaClan with URL: {search_url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
             
             async with aiohttp.ClientSession() as session:
-                # First get the search page to get any necessary tokens
-                async with session.get(f"{self.base_url}/") as response:
+                async with session.get(search_url, headers=headers) as response:
                     if response.status != 200:
-                        logger.error(f"Failed to fetch search page: {response.status}")
+                        logger.error(f"Failed to fetch search results: {response.status}")
                         return []
                     
                     html = await response.text()
                     soup = BeautifulSoup(html, 'html.parser')
                     
-                    # Find the search form
-                    search_form = soup.find('form', class_='search-form')
-                    if not search_form:
-                        logger.error("Could not find search form")
+                    results = []
+                    
+                    # Find the main search results container
+                    search_container = soup.find('div', class_='c-tabs-item__content')
+                    if not search_container:
+                        logger.warning("Could not find search results container")
                         return []
                     
-                    # Get the search action URL
-                    search_action = search_form.get('action', '')
-                    if not search_action:
-                        search_action = f"{self.base_url}/"
+                    # Find all individual search result entries
+                    # Each result is in a div with class "row c-tabs-item__content"
+                    result_items = search_container.find_all('div', class_='row c-tabs-item__content')
+                    logger.info(f"Found {len(result_items)} search result items")
                     
-                    # Now perform the search
-                    search_data = {
-                        'action': 'wp-manga-search-manga',
-                        'title': query
-                    }
-                    
-                    async with session.post(search_action, data=search_data) as search_response:
-                        if search_response.status != 200:
-                            logger.error(f"Failed to perform search: {search_response.status}")
-                            return []
-                        
-                        search_html = await search_response.text()
-                        search_soup = BeautifulSoup(search_html, 'html.parser')
-                        
-                        # Find search results
-                        results = []
-                        manga_items = search_soup.find_all('div', class_='tab-thumb c-image-hover')
-                        
-                        for item in manga_items:
-                            try:
-                                # Get the title and link
-                                title_elem = item.find('a', class_='post-title')
-                                if not title_elem:
-                                    continue
-                                
-                                title = title_elem.text.strip()
-                                link = title_elem['href']
-                                
-                                # Get the thumbnail
-                                img_elem = item.find('img')
-                                thumbnail = img_elem['src'] if img_elem else None
-                                
-                                results.append({
-                                    'title': title,
-                                    'url': link,
-                                    'thumbnail': thumbnail
-                                })
-                            except Exception as e:
-                                logger.error(f"Error parsing search result: {e}")
+                    for item in result_items:
+                        try:
+                            # Find the manga title and URL within the h3 > a structure
+                            title_container = item.find('div', class_='post-title')
+                            if not title_container:
                                 continue
-                        
-                        logger.info(f"Found {len(results)} search results for query: {query}")
-                        return results[:5]  # Return top 5 results
+                                
+                            title_elem = title_container.find('h3', class_='h4')
+                            if not title_elem:
+                                continue
+                                
+                            title_link = title_elem.find('a')
+                            if not title_link:
+                                continue
+                            
+                            title = title_link.text.strip()
+                            url = title_link['href']
+                            
+                            # Ensure URL is absolute
+                            if not url.startswith('http'):
+                                url = urljoin(self.base_url, url)
+                            
+                            # Find the thumbnail image
+                            thumbnail = None
+                            thumb_container = item.find('div', class_='tab-thumb c-image-hover')
+                            if thumb_container:
+                                img_elem = thumb_container.find('img')
+                                if img_elem:
+                                    thumbnail = img_elem.get('src')
+                                    if thumbnail and not thumbnail.startswith('http'):
+                                        thumbnail = urljoin(self.base_url, thumbnail)
+                            
+                            # Extract additional info like genres and status if available
+                            summary_container = item.find('div', class_='tab-summary')
+                            genres = []
+                            status = None
+                            
+                            if summary_container:
+                                # Try to find genres
+                                genre_container = summary_container.find('div', class_='mg_genres')
+                                if genre_container:
+                                    genre_links = genre_container.find_all('a')
+                                    genres = [link.text.strip() for link in genre_links]
+                                
+                                # Try to find status
+                                status_container = summary_container.find('div', class_='mg_status')
+                                if status_container:
+                                    status_elem = status_container.find('div', class_='summary-content')
+                                    if status_elem:
+                                        status = status_elem.text.strip()
+                            
+                            result = {
+                                'title': title,
+                                'url': url,
+                                'thumbnail': thumbnail,
+                                'genres': genres,
+                                'status': status
+                            }
+                            
+                            results.append(result)
+                            
+                        except Exception as e:
+                            logger.error(f"Error parsing individual search result: {e}")
+                            continue
+                    
+                    logger.info(f"Successfully parsed {len(results)} search results for query: '{query}'")
+                    return results[:10]  # Return top 10 results
                     
         except Exception as e:
-            logger.error(f"Error searching ManhwaClan: {e}")
+            logger.error(f"Error searching ManhwaClan for '{query}': {e}")
             return []

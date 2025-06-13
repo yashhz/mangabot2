@@ -113,88 +113,22 @@ class ManhwaScraperManager:
             logger.error(f"Error downloading chapter images: {e}")
             return []
 
-    async def search_manhwa(self, query: str, site_name: str) -> List[Dict[str, str]]:
-        """Search for manhwa on the specified site"""
-        if site_name.lower() == "manhwaclan":
-            return await self._search_manhwaclan(query)
-        else:
-            logger.error(f"Search not implemented for site: {site_name}")
-            return []
-
-    async def _search_manhwaclan(self, query: str) -> List[Dict[str, str]]:
-        """Search for manhwa on ManhwaClan"""
+    async def search_manhwa(self, query: str) -> List[Dict[str, str]]:
+        """Search for manhwa using ManhwaClan scraper"""
         try:
-            # Format the search URL
-            search_url = f"https://manhwaclan.com/?s={query.replace(' ', '+')}"
-            logger.info(f"Searching ManhwaClan with URL: {search_url}")
+            # Use ManhwaClan scraper for search
+            scraper = self.scrapers.get('manhwaclan.com')
+            if not scraper:
+                logger.error("ManhwaClan scraper not available")
+                return []
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(search_url, headers=self.headers) as response:
-                    if response.status != 200:
-                        logger.error(f"Failed to fetch search results: {response.status}")
-                        return []
-                    
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    # Find all search results
-                    results = []
-                    
-                    # Try different possible selectors for search results
-                    selectors = [
-                        ('div', 'manga-item'),  # New structure
-                        ('div', 'bs'),          # Alternative structure
-                        ('article', 'post'),    # Old structure
-                        ('div', 'item-thumb'),  # Another possible structure
-                    ]
-                    
-                    for tag, class_name in selectors:
-                        items = soup.find_all(tag, class_=class_name)
-                        if items:
-                            logger.info(f"Found results using selector: {tag}.{class_name}")
-                            for item in items:
-                                try:
-                                    # Try different possible title selectors
-                                    title_elem = (
-                                        item.find('h3', class_='manga-title') or
-                                        item.find('h4') or
-                                        item.find('h2', class_='title') or
-                                        item.find('h3') or
-                                        item.find('h2')
-                                    )
-                                    
-                                    if not title_elem:
-                                        continue
-                                        
-                                    title = title_elem.text.strip()
-                                    link = title_elem.find('a')['href']
-                                    
-                                    # Try different possible image selectors
-                                    img_elem = (
-                                        item.find('img', class_='manga-thumb') or
-                                        item.find('img', class_='wp-post-image') or
-                                        item.find('img')
-                                    )
-                                    thumbnail = img_elem['src'] if img_elem else None
-                                    
-                                    results.append({
-                                        'title': title,
-                                        'url': link,
-                                        'thumbnail': thumbnail
-                                    })
-                                except Exception as e:
-                                    logger.error(f"Error parsing search result: {e}")
-                                    continue
-                            
-                            # If we found results with this selector, break the loop
-                            if results:
-                                break
-                    
-                    logger.info(f"Found {len(results)} search results for query: {query}")
-                    return results[:5]  # Return top 5 results
-                    
+            logger.info(f"Searching for manhwa with query: '{query}'")
+            results = await scraper.search_manhwa(query)
+            logger.info(f"Search completed, found {len(results)} results")
+            return results
+            
         except Exception as e:
-            logger.error(f"Error searching ManhwaClan: {e}")
+            logger.error(f"Error in search_manhwa: {e}")
             return []
 
     async def get_chapter_list(self, url: str, site_name: str) -> List[Dict[str, str]]:
@@ -277,7 +211,7 @@ class ManhwaScraperManager:
                                     return filename
                         except Exception as e:
                             logger.error(f"Error downloading image {img_url}: {e}")
-            return None
+                        return None
 
                     # Create tasks for concurrent downloads
                     tasks = [download_image(url, i) for i, url in enumerate(image_urls)]
